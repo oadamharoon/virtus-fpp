@@ -3,7 +3,13 @@ from omni.isaac.core.world import World
 from omni.isaac.core.materials import OmniPBR
 from omni.isaac.core import SimulationContext
 from omni.isaac.examples.user_examples.CalibrationBoardGenerator import CalibrationBoardGenerator
-from omni.isaac.examples.user_examples.realworld2digitaltwin import projector_rw2dt, camera_rw2dt
+from omni.isaac.examples.user_examples.realworld2digitaltwin import (
+    projector_rw2dt, inverse_camera, camera_rw2dt, projector_world_position, projector_world_orientation,
+)
+from omni.isaac.core.utils.stage import add_reference_to_stage
+from omni.isaac.core.utils.nucleus import get_assets_root_path
+from omni.isaac.core.prims import XFormPrim
+from omni.isaac.franka import Franka
 from omni.isaac.sensor import Camera
 import omni.isaac.core.utils.numpy.rotations as rot_utils
 import numpy as np
@@ -24,16 +30,28 @@ class HelloWorld(BaseSample):
         self.simulation_context = SimulationContext(set_defaults=True)
         
         # Operation mode
-        self.mode = "calibrate"  # "calibrate", "scan", "training", or "ablation"
+        self.mode = "calibrate"  # "calibrate", "scan", "training", "ablation", or "factory_arm"
 
         # Add real-world system modeling flag and parameters
-        self.use_real_world_params = False  # Set to True to use real-world camera/projector parameters
+        self.use_real_world_params = True  # Set to True to use real-world camera/projector parameters
+
+        calib_path = "C:/Users/oadam/Downloads/Calib_544_514/Calib_123" # alt: "C:/Users/oadam/Downloads/calibdata062024" 
+
         self.real_world_params = {
-            'cam_mat_path': "C:/Users/oadam/Downloads/calibdata062024/CamIntrinsicMatrix.txt",   # "C:/path/to/camera_matrix.txt"
-            'proj_mat_path': "C:/Users/oadam/Downloads/calibdata062024/ProjIntrinsicMatrix.txt", # "C:/path/to/projector_matrix.txt"
+            'calib_path': calib_path,
+
+            'cam_mat_path':   f"{calib_path}/CamIntrinsicMatrix.txt", # "C:/path/to/camera_matrix.txt"
+            'proj_mat_path':  f"{calib_path}/ProjIntrinsicMatrix.txt", # "C:/path/to/projector_matrix.txt"
+
+            'cam_rot_path':   f"{calib_path}/CamRotationMatrix.txt",
+            'cam_trans_path': f"{calib_path}/CamTranslationVector.txt",
+
+            'proj_rot_path':  f"{calib_path}/ProjRotationMatrix.txt",
+            'proj_trans_path':f"{calib_path}/ProjTranslationVector.txt",
+
             'cam_width': 544,               # Camera resolution width in pixels
             'cam_height': 514,              # Camera resolution height in pixels
-            'fringe_pattern_width': 880,    # Fringe pattern width in pixels
+            'fringe_pattern_width':  880,   # Fringe pattern width in pixels
             'fringe_pattern_height': 2400,  # Fringe pattern height in pixels
             'pixel_size': 5.86 * 1e-3,      # Camera pixel size in mm (5.86 microns)
             'f_stop': 1.8,                  # Camera f-stop
@@ -437,6 +455,41 @@ class HelloWorld(BaseSample):
             'frames_total': 0,  # Will be set based on texture files
         }
 
+        # Factory arm mode parameters. The Franka carries the FPP camera +
+        # projector. Env and scan target are loaded as references from
+        # absolute URLs (same SimReady source as the other modes use).
+        self.factory_arm_params = {
+            'frames_captured': 0,
+            'frames_total': 0,
+            'robot_prim_path':    "/World/Franka",
+            'env_prim_path':      "/World/Factory",
+            'target_prim_path':   "/World/ScanTarget",
+            'env_asset_url':      "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.1/Isaac/Environments/Simple_Warehouse/warehouse_with_forklifts.usd",
+            'target_asset_url':   "https://huggingface.co/datasets/nvidia/PhysicalAI-SimReady-Warehouse-01/resolve/main/Props/general/HandManipulation/cleaning_bottle_spray_a/sm_cleaning_bottle_spray_a01_simready_01.usd",
+            'target_position':    np.array([0.7, 0.0, 0.0]),
+            'target_scale':       np.array([6.0, 6.0, 6.0]),
+            # Dim every light baked into the warehouse env by this factor so
+            # the FPP projector dominates the scene (FPP works best in the
+            # dark). 0.0 kills env lighting entirely; 1.0 is unchanged.
+            'env_light_dim_factor': 0.05,
+            # Initial joint positions for the Franka. 9 DOFs total:
+            # 7 arm joints + 2 gripper finger joints. Arm values are tuned
+            # to bend forward-and-down so the FPP rig on the gripper looks
+            # at the scan target sitting on the floor in front of the
+            # robot; finger values keep the gripper open at ~4cm.
+            'initial_joint_positions': np.array(
+                [0.0, 0.85, 0.0, -1.7, 0.0, 2.55, 0.785, 0.04, 0.04]
+            ),
+            # Camera + projector poses in the end-effector's local frame.
+            # The camera sits at the hand origin (rotated 90 deg about Y so
+            # it looks down the gripper axis), the projector is offset
+            # 125 mm to the left to match the FPP baseline.
+            'cam_local_pos':      np.array([0.0,    0.0, 0.10]),
+            'cam_local_euler_deg':np.array([0.0,   90.0, 0.0]),
+            'proj_local_pos':     Gf.Vec3f(-0.125, 0.0, 0.10),
+            'proj_local_euler':   Gf.Vec3f(270.0, 180.0, 90.0),
+        }
+
     def _get_calibration_positions(self):
         # Base positions for calibration board
         base_x_pos = 1.0
@@ -546,6 +599,11 @@ class HelloWorld(BaseSample):
             (base_x_rot + x_offset_rot_lg, base_y_rot, base_z_rot + z_offset_rot_lg)
         ]
 
+    # Baseline intensity for the default ground-plane sphere light, shared
+    # across every mode. Ablation's "No_Ambient" setup overrides this to 0
+    # downstream in setup_ablation_lighting; other modes inherit it as-is.
+    DEFAULT_SPHERE_LIGHT_INTENSITY = 10000.0
+
     def setup_scene(self):
         """Setup the simulation scene based on selected mode"""
         self.simulation_context = SimulationContext.instance()
@@ -553,17 +611,27 @@ class HelloWorld(BaseSample):
         world.scene.add_default_ground_plane()
         stage = omni.usd.get_context().get_stage()
 
+        self._set_default_sphere_light_intensity(
+            stage, self.DEFAULT_SPHERE_LIGHT_INTENSITY
+        )
+
         # Setup camera and projector (shared between modes)
         if hasattr(self, 'use_real_world_params') and self.use_real_world_params:
             print("Using real-world system parameters for camera and projector")
         else:
             print("Using simulation parameters for camera and projector")
-        self._setup_camera()
+
+        # In factory_arm mode the FPP rig is parented under the Franka, so
+        # the robot+env need to exist first.
+        if self.mode == "factory_arm":
+            self.setup_factory_arm_scene(stage)
+
+        self._setup_camera(stage)
         self._setup_projector(stage)
-        
+
         # Load and setup texture files
         self._load_texture_files()
-        
+
         if self.mode == "calibrate":
             self.setup_calibration_board(stage)
             self.setup_background_plane(stage)
@@ -578,8 +646,14 @@ class HelloWorld(BaseSample):
             self.setup_ablation_sphere(stage)
             self.setup_background_plane(stage)
             self.setup_ablation_lighting(stage)
+        elif self.mode == "factory_arm":
+            # Robot, env and target already set up above; nothing else to add.
+            pass
         else:
-            raise ValueError(f"Invalid mode: {self.mode}. Must be either 'calibrate', 'scan', 'training', or 'ablation'")
+            raise ValueError(
+                f"Invalid mode: {self.mode}. Must be one of "
+                "'calibrate', 'scan', 'training', 'ablation', 'factory_arm'."
+            )
 
         # RT Subframes setting for rendering correction and ray tracing rendering setup
         # https://docs.isaacsim.omniverse.nvidia.com/latest/replicator_tutorials/tutorial_replicator_getting_started.html
@@ -589,15 +663,121 @@ class HelloWorld(BaseSample):
         carb_settings.set("/rtx/directLighting/sampledLighting/enabled", False) # Enables higher fringe image quality
         carb_settings.set("/rtx/shadows/enabled", False)
 
-    def _setup_camera(self):
+    def _set_default_sphere_light_intensity(self, stage, intensity):
+        """Set the intensity of the SphereLight that ships with the
+        default ground plane. Shared across modes so all experiments
+        start from the same ambient baseline."""
+        sphere_light_path = "/World/defaultGroundPlane/SphereLight"
+        sphere_light = stage.GetPrimAtPath(sphere_light_path)
+        if not sphere_light or not sphere_light.IsValid():
+            return
+        attr = sphere_light.GetAttribute("intensity")
+        if attr:
+            attr.Set(float(intensity))
+
+    def _dim_lights_under(self, stage, root_prim_path, dim_factor):
+        """Walk every prim under root_prim_path and multiply the intensity
+        of any UsdLux light by dim_factor (0..1). Use after loading a USD
+        environment reference to suppress its baked lighting so the FPP
+        projector dominates the scene."""
+        root = stage.GetPrimAtPath(root_prim_path)
+        if not root or not root.IsValid():
+            return
+        light_apis = (
+            UsdLux.DomeLight, UsdLux.DistantLight, UsdLux.SphereLight,
+            UsdLux.RectLight, UsdLux.DiskLight, UsdLux.CylinderLight,
+        )
+        dimmed = 0
+        for prim in Usd.PrimRange(root):
+            for api in light_apis:
+                if prim.IsA(api):
+                    light = api(prim)
+                    intensity_attr = light.GetIntensityAttr()
+                    if intensity_attr.HasAuthoredValue():
+                        cur = intensity_attr.Get()
+                    else:
+                        cur = intensity_attr.Get() or 0.0
+                    intensity_attr.Set(float(cur) * float(dim_factor))
+                    dimmed += 1
+                    break
+        print(f"Dimmed {dimmed} light(s) under {root_prim_path} by x{dim_factor}")
+
+    def setup_factory_arm_scene(self, stage):
+        """Load the warehouse environment, spawn a Franka, and place a scan
+        target in front of it. Called from setup_scene when mode=='factory_arm'.
+        """
+        world = self.get_world()
+
+        # Warehouse environment as a reference.
+        add_reference_to_stage(
+            usd_path=self.factory_arm_params['env_asset_url'],
+            prim_path=self.factory_arm_params['env_prim_path']
+        )
+
+        # Dim every UsdLux light baked into the env so the FPP projector
+        # dominates the scene.
+        self._dim_lights_under(
+            stage,
+            self.factory_arm_params['env_prim_path'],
+            self.factory_arm_params['env_light_dim_factor'],
+        )
+
+        # Standard Franka arm. Initial joint positions bend the arm
+        # forward-and-down so the FPP rig points at the floor-mounted
+        # scan target.
+        self._franka = world.scene.add(
+            Franka(
+                prim_path=self.factory_arm_params['robot_prim_path'],
+                name="franka_fpp",
+            )
+        )
+        self._franka.set_joints_default_state(
+            positions=self.factory_arm_params['initial_joint_positions']
+        )
+
+        # Scan target.
+        add_reference_to_stage(
+            usd_path=self.factory_arm_params['target_asset_url'],
+            prim_path=self.factory_arm_params['target_prim_path']
+        )
+        XFormPrim(
+            self.factory_arm_params['target_prim_path'],
+            position=self.factory_arm_params['target_position'],
+            scale=self.factory_arm_params['target_scale'],
+        )
+
+        # Apply the same uniform "background plane" material to all meshes
+        # under the scan target, mirroring what scan mode does. This gives
+        # the FPP system a clean diffuse surface to project fringes onto.
+        self._apply_uniform_material_to_scan_object(
+            stage, scan_path=self.factory_arm_params['target_prim_path']
+        )
+
+    def _setup_camera(self, stage):
         """Setup the camera with appropriate parameters"""
         calculated_dynamic_frequency = int(1 / (self.texture_update_interval))
-        self.camera = Camera(
-            prim_path="/World/Camera",
-            position=np.array([-1.2, -0.125, 1.5]),
-            frequency=calculated_dynamic_frequency,
-            resolution=(self.real_world_params['cam_width'], self.real_world_params['cam_height']) if self.use_real_world_params else (960, 960)
-        )
+        resolution = (self.real_world_params['cam_width'], self.real_world_params['cam_height']) \
+            if self.use_real_world_params else (960, 960)
+
+        if self.mode == "factory_arm":
+            # Parented under the Franka hand so it tracks the end-effector.
+            cam_prim_path = self.factory_arm_params['robot_prim_path'] + "/panda_hand/FPPCamera"
+            self.camera = Camera(
+                prim_path=cam_prim_path,
+                translation=self.factory_arm_params['cam_local_pos'],
+                orientation=rot_utils.euler_angles_to_quats(
+                    self.factory_arm_params['cam_local_euler_deg'], degrees=True
+                ),
+                frequency=calculated_dynamic_frequency,
+                resolution=resolution,
+            )
+        else:
+            self.camera = Camera(
+                prim_path="/World/Camera",
+                position=np.array([-1.2, -0.125, 1.5]),
+                frequency=calculated_dynamic_frequency,
+                resolution=resolution,
+            )
         # Add camera to the world
         self.camera.initialize()
 
@@ -605,7 +785,9 @@ class HelloWorld(BaseSample):
         if self.use_real_world_params:
             # Get camera parameters from the real-world model
             [focal_length, focus_distance, lens_aperture, 
-            horizontal_aperture, vertical_aperture, clipping_range] = camera_rw2dt(
+            horizontal_aperture, vertical_aperture, 
+            horizontal_aperture_offset, vertical_aperture_offset,
+            clipping_range] = camera_rw2dt(
                 self.real_world_params['cam_mat_path'],
                 self.real_world_params['cam_height'],
                 self.real_world_params['cam_width'],
@@ -620,25 +802,72 @@ class HelloWorld(BaseSample):
             self.camera.set_lens_aperture(lens_aperture)
             self.camera.set_vertical_aperture(vertical_aperture)
             self.camera.set_horizontal_aperture(horizontal_aperture)
+            cam_prim = stage.GetPrimAtPath(self.camera.prim_path)
+            cam_prim.GetAttribute("horizontalApertureOffset").Set(horizontal_aperture_offset)
+            cam_prim.GetAttribute("verticalApertureOffset").Set(vertical_aperture_offset)
+            h_actual = cam_prim.GetAttribute("horizontalApertureOffset").Get()
+            v_actual = cam_prim.GetAttribute("verticalApertureOffset").Get()
+            print(f"Pass H: {horizontal_aperture_offset}  USD H: {h_actual}")
+            print(f"Pass V: {vertical_aperture_offset}  USD V: {v_actual}")
             self.camera.set_clipping_range(clipping_range[0], clipping_range[1])
             
             print("Applied real-world camera parameters")
 
     def _setup_projector(self, stage):
         """Setup the projector light"""
-        self.light_prim_path = "/World/Projector"
-        light_prim = UsdLux.RectLight.Define(stage, self.light_prim_path)
-        light_prim.AddTranslateOp().Set(Gf.Vec3f(-1.2, 0, 1.4))
-        light_prim.AddRotateXYZOp().Set(Gf.Vec3f(270, 180, 90))
+
+        if self.mode == "factory_arm":
+            # Projector parented under the Franka hand, with a local offset
+            # for the camera-projector baseline.
+            self.light_prim_path = self.factory_arm_params['robot_prim_path'] \
+                                   + "/panda_hand/FPPProjector"
+            light_prim = UsdLux.RectLight.Define(stage, self.light_prim_path)
+            light_prim.AddTranslateOp().Set(self.factory_arm_params['proj_local_pos'])
+            light_prim.AddRotateXYZOp().Set(self.factory_arm_params['proj_local_euler'])
+        else:
+            self.light_prim_path = "/World/Projector"
+            light_prim = UsdLux.RectLight.Define(stage, self.light_prim_path)
+
+            # Default hardcoded projector pose. When use_real_world_params is on,
+            # the translation is overridden by the calibration extrinsics so the
+            # projector sits at the calibrated baseline from the camera.
+            proj_pos = Gf.Vec3f(-1.2, 0, 1.4)
+            proj_euler = Gf.Vec3f(270, 180, 90)
+            if self.use_real_world_params:
+                cam_pos = np.array([-1.2, -0.125, 1.5])
+                p = projector_world_position(
+                    self.real_world_params['proj_rot_path'],
+                    self.real_world_params['proj_trans_path'],
+                    cam_pos,
+                )
+                proj_pos = Gf.Vec3f(float(p[0]), float(p[1]), float(p[2]))
+                print(f"Calibrated projector world position (m): "
+                      f"({p[0]:.4f}, {p[1]:.4f}, {p[2]:.4f})")
+                _, proj_euler_extr, _ = projector_world_orientation(
+                    self.real_world_params['proj_rot_path']
+                )
+                proj_euler = Gf.Vec3f(*(float(a) for a in proj_euler_extr))
+ 
+            light_prim.AddTranslateOp().Set(proj_pos)
+            light_prim.AddRotateXYZOp().Set(proj_euler)
 
          # Apply scaling based on whether real-world parameters are used
         if self.use_real_world_params:
             # Get projector parameters from the real-world model
-            [x_scale, y_scale] = projector_rw2dt(
+            # [x_scale, y_scale] = projector_rw2dt(
+            #     self.real_world_params['proj_mat_path'],
+            #     self.real_world_params['fringe_pattern_height'],
+            #     self.real_world_params['fringe_pattern_width'],
+            #     scaling_factor=1.0
+            # )
+
+            [x_scale, y_scale] = inverse_camera(
                 self.real_world_params['proj_mat_path'],
-                self.real_world_params['fringe_pattern_height'],
+                self.real_world_params['proj_rot_path'],
+                self.real_world_params['proj_trans_path'],
                 self.real_world_params['fringe_pattern_width'],
-                scaling_factor=0.5
+                self.real_world_params['fringe_pattern_height'],
+                screen_dist=1.0
             )
             
             # Apply the calculated scaling to the projector
@@ -950,9 +1179,9 @@ class HelloWorld(BaseSample):
         print(f"Initial rotation: {self.scanning_params['base_rotation']}")
         print(f"Scale: {self.scanning_params['object_scale']}")
 
-    def _apply_uniform_material_to_scan_object(self, stage):
+    def _apply_uniform_material_to_scan_object(self, stage, scan_path="/World/Scan"):
         """
-        Recursively traverse all meshes under the scan object and bind them 
+        Recursively traverse all meshes under the scan object and bind them
         to a uniform material identical to the background plane material.
         """
         # Create the uniform material (identical to background plane)
@@ -980,8 +1209,7 @@ class HelloWorld(BaseSample):
         else:
             material = UsdShade.Material(material_prim)
         
-        # Recursively find and bind all meshes under /World/Scan
-        scan_path = "/World/Scan"
+        # Recursively find and bind all meshes under the given scan_path.
         scan_prim = stage.GetPrimAtPath(scan_path)
         
         if not scan_prim or not scan_prim.IsValid():
@@ -1059,6 +1287,8 @@ class HelloWorld(BaseSample):
             self.scanning_params['frames_per_angle'] = len(self.texture_files)
         elif self.mode == "ablation":
             self.ablation_params['frames_total'] = len(self.texture_files)
+        elif self.mode == "factory_arm":
+            self.factory_arm_params['frames_total'] = len(self.texture_files)
         else:  # Training mode
             self.training_params['frames_total'] = len(self.texture_files)
         
@@ -1081,6 +1311,8 @@ class HelloWorld(BaseSample):
                     self._handle_scanning_update()
                 elif self.mode == "ablation":
                     self._handle_ablation_update()
+                elif self.mode == "factory_arm":
+                    self._handle_factory_arm_update()
                 else: # Training mode
                     self._handle_training_update()
                 
@@ -1093,11 +1325,20 @@ class HelloWorld(BaseSample):
     def _handle_ablation_update(self):
         """Handle updates for ablation mode"""
         self.ablation_params['frames_captured'] += 1
-        
+
         if self.ablation_params['frames_captured'] >= self.ablation_params['frames_total']:
             self.end_time = time.time()
             print("Ablation sequence complete!")
             print(f"Material: {self.ablation_params['material_type']}, Lighting: {self.ablation_params['lighting_setup']}")
+            print(f"Total images captured: {self.frame_count}")
+            self.simulation_context.stop()
+
+    def _handle_factory_arm_update(self):
+        """Handle updates for factory_arm mode (Franka-mounted FPP)"""
+        self.factory_arm_params['frames_captured'] += 1
+        if self.factory_arm_params['frames_captured'] >= self.factory_arm_params['frames_total']:
+            self.end_time = time.time()
+            print("Factory-arm scan sequence complete!")
             print(f"Total images captured: {self.frame_count}")
             self.simulation_context.stop()
 
@@ -1167,6 +1408,9 @@ class HelloWorld(BaseSample):
             lighting = self.ablation_params['lighting_setup']
             save_directory = f"C:/Users/oadam/Downloads/ablation_scans/{material}_{lighting}"
             image_index = self.ablation_params['frames_captured']
+        elif self.mode == "factory_arm":
+            save_directory = "C:/Users/oadam/Downloads/factory_arm_scans"
+            image_index = self.factory_arm_params['frames_captured']
         else: # Training mode
             save_directory = "C:/Users/oadam/Downloads/isaac_calib_scans_rt0_albation_test_sphere_rectambientlight2"
             image_index = self.training_params['frames_captured']
