@@ -1,3 +1,12 @@
+"""Calibration board texture generation for VIRTUS-FPP.
+
+Builds an asymmetric circle-grid calibration pattern (the kind OpenCV's
+findCirclesGrid expects) and renders it to a square PNG texture that the main
+sample binds to the calibration board plane. Physical measurements (circle
+diameter, spacing, border) are specified in millimeters and scaled to fit a
+fixed-size plane mesh while preserving their real-world ratios.
+"""
+
 import numpy as np
 import cv2
 import os
@@ -5,7 +14,10 @@ import tempfile
 from typing import Tuple
 
 class CalibrationBoardGenerator:
-    def __init__(self, 
+    """Generates a circle-grid calibration board texture from physical
+    (millimeter) measurements, scaled to fit a fixed plane mesh."""
+
+    def __init__(self,
                  rows: int = 10,                        # Number of circle rows
                  cols: int = 18,                        # Number of circle columns
                  circle_diameter: float = 20.0,         # mm
@@ -45,9 +57,15 @@ class CalibrationBoardGenerator:
         # Calculate derived parameters
         self._calculate_derived_parameters()
 
-    def _validate_inputs(self, rows, cols, circle_diameter, circle_center_distance, 
-                        border_length, scale_factor, plane_width, plane_height):
-        """Validate input parameters"""
+    def _validate_inputs(self, rows: float, cols: float, circle_diameter: float,
+                        circle_center_distance: float, border_length: float,
+                        scale_factor: float, plane_width: float, plane_height: float) -> None:
+        """Validate the constructor parameters.
+
+        Raises TypeError if any value is non-numeric and ValueError if any is
+        non-positive, if circles would overlap (diameter >= center distance),
+        or if the border is too small to contain a half circle.
+        """
         if not all(isinstance(x, (int, float)) for x in [rows, cols, circle_diameter, 
                                                         circle_center_distance, border_length, 
                                                         scale_factor, plane_width, plane_height]):
@@ -63,8 +81,10 @@ class CalibrationBoardGenerator:
         if border_length < circle_diameter/2:
             raise ValueError("Border length must be at least half the circle diameter")
         
-    def _calculate_derived_parameters(self):
-        """Calculate all derived parameters for the calibration board"""
+    def _calculate_derived_parameters(self) -> None:
+        """Compute the physical pattern size, the scale that fits it to the
+        plane, and the resulting pixel dimensions (circle radius, spacing,
+        border) used when rasterizing the texture."""
         self.mm_to_meters = 0.001
         
         # Physical dimensions in meters
@@ -173,8 +193,9 @@ class CalibrationBoardGenerator:
         
         return temp_path
     
-    def _get_expected_measurements(self):
-        """Outputs summary of expected measurements to console"""
+    def _get_expected_measurements(self) -> None:
+        """Print a summary of the pattern's expected physical measurements
+        (size on the plane, circle diameter and spacing) for verification."""
         print("\nApproximate expected measurements:")
         print(f"Pattern physical size: {self.pattern_width:.3f}m x {self.pattern_height:.3f}m")
         print(f"Scaled to fit plane: {self.pattern_width * self.pattern_scale:.3f}m x {self.pattern_height * self.pattern_scale:.3f}m")

@@ -1,3 +1,30 @@
+"""VIRTUS-FPP: Virtual Sensor Modeling for Fringe Projection Profilometry.
+
+Core sample extension for VIRTUS-FPP, a virtual fringe projection
+profilometry (FPP) sensor built on NVIDIA Isaac Sim. A virtual camera and an
+inverse-camera-modeled projector (a textured RectLight that cycles through a
+stack of fringe patterns) are placed in an RTX ray-traced scene. The camera
+captures one image per projected pattern and writes the frames to disk for
+downstream phase unwrapping and 3D reconstruction.
+
+The extension runs in one of several modes (self.mode), each setting up a
+different scene and capture sequence:
+
+* "calibrate":   sweep a circle-grid calibration board through a series of
+  poses to recover camera/projector intrinsics and extrinsics.
+* "scan":        rotate a YCB / SimReady object on a turntable and capture
+  fringe images at each angle (synthetic dataset generation).
+* "training":    project fringes onto a flat plane (e.g. phase-unwrapping
+  training data).
+* "ablation":    vary surface material and ambient lighting to study their
+  effect on reconstruction quality.
+* "factory_arm": mount the FPP rig on a Franka end-effector in a warehouse
+  environment for a robot-mounted scanning demo.
+
+All tunable parameters live in HelloWorld.__init__ (grouped into *_params
+dicts) and in the module-level constants.
+"""
+
 from omni.isaac.examples.base_sample import BaseSample
 from omni.isaac.core.world import World
 from omni.isaac.core.materials import OmniPBR
@@ -21,16 +48,30 @@ import re
 import time
 import carb
 
-def natural_sort_key(s):
+def natural_sort_key(s: str) -> list:
+    """Sort key for natural (human) ordering.
+
+    Splits on digit runs so "frame2" sorts before "frame10". Used to order
+    the fringe-pattern texture files by their numeric index.
+    """
     return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', s)]
 
 class HelloWorld(BaseSample):
+    """Isaac Sim sample implementing the VIRTUS-FPP virtual FPP sensor.
+
+    Builds the scene in setup_scene, registers a per-physics-step callback in
+    setup_post_load, and on each step advances the projected fringe pattern and
+    saves a camera frame until the mode-specific sequence completes. The active
+    behavior is selected by self.mode; all tunable parameters are set in
+    __init__.
+    """
+
     def __init__(self) -> None:
         super().__init__()
         self.simulation_context = SimulationContext(set_defaults=True)
         
         # Operation mode
-        self.mode = "calibrate"  # "calibrate", "scan", "training", "ablation", or "factory_arm"
+        self.mode = "ablation"  # "calibrate", "scan", "training", "ablation", or "factory_arm"
 
         # Add real-world system modeling flag and parameters
         self.use_real_world_params = True  # Set to True to use real-world camera/projector parameters
@@ -490,7 +531,9 @@ class HelloWorld(BaseSample):
             'proj_local_euler':   Gf.Vec3f(270.0, 180.0, 90.0),
         }
 
-    def _get_calibration_positions(self):
+    def _get_calibration_positions(self) -> list:
+        """Return the list of (x, y, z) world positions (meters) the
+        calibration board is stepped through, one per capture pose."""
         # Base positions for calibration board
         base_x_pos = 1.0
         base_y_pos = 0.0
@@ -544,7 +587,9 @@ class HelloWorld(BaseSample):
             (base_x_pos, base_y_pos + y_offset_pos, base_z_pos - z_offset_pos)
         ]
 
-    def _get_calibration_orientations(self):
+    def _get_calibration_orientations(self) -> list:
+        """Return the list of (x, y, z) Euler rotations (degrees) the
+        calibration board is stepped through, paired with the positions."""
         # Base rotations for calibration board
         base_x_rot = 90
         base_y_rot = 0
@@ -604,8 +649,13 @@ class HelloWorld(BaseSample):
     # downstream in setup_ablation_lighting; other modes inherit it as-is.
     DEFAULT_SPHERE_LIGHT_INTENSITY = 10000.0
 
-    def setup_scene(self):
-        """Setup the simulation scene based on selected mode"""
+    def setup_scene(self) -> None:
+        """Build the scene for the selected mode.
+
+        Adds the ground plane, camera and projector (shared across modes),
+        loads the fringe textures, then dispatches to the mode-specific setup.
+        Called once by BaseSample when the world loads.
+        """
         self.simulation_context = SimulationContext.instance()
         world = self.get_world()
         world.scene.add_default_ground_plane()
@@ -663,7 +713,7 @@ class HelloWorld(BaseSample):
         carb_settings.set("/rtx/directLighting/sampledLighting/enabled", False) # Enables higher fringe image quality
         carb_settings.set("/rtx/shadows/enabled", False)
 
-    def _set_default_sphere_light_intensity(self, stage, intensity):
+    def _set_default_sphere_light_intensity(self, stage: Usd.Stage, intensity: float) -> None:
         """Set the intensity of the SphereLight that ships with the
         default ground plane. Shared across modes so all experiments
         start from the same ambient baseline."""
@@ -675,7 +725,7 @@ class HelloWorld(BaseSample):
         if attr:
             attr.Set(float(intensity))
 
-    def _dim_lights_under(self, stage, root_prim_path, dim_factor):
+    def _dim_lights_under(self, stage: Usd.Stage, root_prim_path: str, dim_factor: float) -> None:
         """Walk every prim under root_prim_path and multiply the intensity
         of any UsdLux light by dim_factor (0..1). Use after loading a USD
         environment reference to suppress its baked lighting so the FPP
@@ -702,7 +752,7 @@ class HelloWorld(BaseSample):
                     break
         print(f"Dimmed {dimmed} light(s) under {root_prim_path} by x{dim_factor}")
 
-    def setup_factory_arm_scene(self, stage):
+    def setup_factory_arm_scene(self, stage: Usd.Stage) -> None:
         """Load the warehouse environment, spawn a Franka, and place a scan
         target in front of it. Called from setup_scene when mode=='factory_arm'.
         """
@@ -753,8 +803,13 @@ class HelloWorld(BaseSample):
             stage, scan_path=self.factory_arm_params['target_prim_path']
         )
 
-    def _setup_camera(self, stage):
-        """Setup the camera with appropriate parameters"""
+    def _setup_camera(self, stage: Usd.Stage) -> None:
+        """Create the capture camera and apply intrinsics.
+
+        In factory_arm mode the camera is parented under the Franka hand;
+        otherwise it sits at a fixed world pose. When use_real_world_params is
+        set, intrinsics are derived from the calibration files via camera_rw2dt.
+        """
         calculated_dynamic_frequency = int(1 / (self.texture_update_interval))
         resolution = (self.real_world_params['cam_width'], self.real_world_params['cam_height']) \
             if self.use_real_world_params else (960, 960)
@@ -813,8 +868,14 @@ class HelloWorld(BaseSample):
             
             print("Applied real-world camera parameters")
 
-    def _setup_projector(self, stage):
-        """Setup the projector light"""
+    def _setup_projector(self, stage: Usd.Stage) -> None:
+        """Create the projector as a textured RectLight.
+
+        The fringe pattern is projected by setting the light's texture each
+        step. Pose and scale are hardcoded by default; when
+        use_real_world_params is set they come from the calibration extrinsics
+        and the inverse-camera model.
+        """
 
         if self.mode == "factory_arm":
             # Projector parented under the Franka hand, with a local offset
@@ -896,8 +957,12 @@ class HelloWorld(BaseSample):
                 is_projector_attr = prim.CreateAttribute("isProjector", Sdf.ValueTypeNames.Bool)
             is_projector_attr.Set(True)
 
-    def setup_ablation_lighting(self, stage):
-        """Setup lighting for the ablation study"""
+    def setup_ablation_lighting(self, stage: Usd.Stage) -> None:
+        """Configure ambient lighting for the ablation study.
+
+        Adds left/right rect lights and toggles their intensity (and the
+        default sphere light) according to ablation_params['lighting_setup'].
+        """
         # Control default ambient light (sphere light)
         sphere_light_path = "/World/defaultGroundPlane/SphereLight"
         sphere_light = stage.GetPrimAtPath(sphere_light_path)
@@ -939,8 +1004,9 @@ class HelloWorld(BaseSample):
         right_light.GetIntensityAttr().Set(right_intensity)
         left_light.GetIntensityAttr().Set(left_intensity)
 
-    def setup_ablation_sphere(self, stage):
-        """Setup the ablation sphere with specified properties"""
+    def setup_ablation_sphere(self, stage: Usd.Stage) -> None:
+        """Create the sphere used as the ablation test object and bind its
+        material per ablation_params['material_type']."""
         # Define the sphere
         sphere_path = "/World/AblationSphere"
         sphere_prim = stage.GetPrimAtPath(sphere_path)
@@ -981,8 +1047,13 @@ class HelloWorld(BaseSample):
         # Create different materials based on the specified material type
         self._setup_ablation_material(stage, sphere_prim)
 
-    def _setup_ablation_material(self, stage, sphere_prim):
-        """Setup material for the ablation sphere based on specified material type"""
+    def _setup_ablation_material(self, stage: Usd.Stage, sphere_prim: Usd.Prim) -> None:
+        """Build and bind the ablation sphere material.
+
+        Material varies by ablation_params['material_type']: 'Reflective'
+        (OmniGlass), 'Metallic' (metallic OmniPBR), or a diffuse OmniPBR
+        baseline (with 'AO_to_diffuse_0' zeroing ambient occlusion).
+        """
         material_path = Sdf.Path("/World/AblationSphere/Material")
         material = UsdShade.Material.Define(stage, material_path)
         
@@ -1041,8 +1112,9 @@ class HelloWorld(BaseSample):
         # Bind material to the sphere
         UsdShade.MaterialBindingAPI(sphere_prim).Bind(material)
 
-    def setup_training_plane(self, stage):
-        """Setup the training plane geometry and material"""
+    def setup_training_plane(self, stage: Usd.Stage) -> None:
+        """Create the flat plane that fringes are projected onto in training
+        mode, with a diffuse OmniPBR material."""
         # Define the training plane as a single-sided plane
         plane_path = "/World/TrainingPlane"
         plane_prim = stage.GetPrimAtPath(plane_path)
@@ -1108,8 +1180,9 @@ class HelloWorld(BaseSample):
         # Bind material to the plane
         UsdShade.MaterialBindingAPI(plane_prim).Bind(material)
 
-    def _scan_object_override(self, object_name):
-        """Applies object specific overrides to the initial scanning_params"""
+    def _scan_object_override(self, object_name: str) -> None:
+        """Apply the per-object overrides from SCAN_OBJECTS to scanning_params
+        and record the object's asset path."""
         if object_name not in self.SCAN_OBJECTS:
             raise ValueError(f"Unknown scan object: {object_name}")
 
@@ -1124,8 +1197,9 @@ class HelloWorld(BaseSample):
         # Store paths for future reference
         self.scanning_params['asset_path'] = cfg["asset_path"]
 
-    def _setup_scan_object(self, stage):
-        """Setup the USD object for scanning with proper scale and position"""
+    def _setup_scan_object(self, stage: Usd.Stage) -> None:
+        """Load the selected scan object as a USD reference and apply its base
+        position, rotation, and scale from scanning_params."""
         # Create a parent Xform for the scan object
         parent_path = "/World/Scan"
         parent_prim = stage.DefinePrim(parent_path, "Xform")
@@ -1179,11 +1253,10 @@ class HelloWorld(BaseSample):
         print(f"Initial rotation: {self.scanning_params['base_rotation']}")
         print(f"Scale: {self.scanning_params['object_scale']}")
 
-    def _apply_uniform_material_to_scan_object(self, stage, scan_path="/World/Scan"):
-        """
-        Recursively traverse all meshes under the scan object and bind them
-        to a uniform material identical to the background plane material.
-        """
+    def _apply_uniform_material_to_scan_object(self, stage: Usd.Stage, scan_path: str = "/World/Scan") -> None:
+        """Recursively bind every mesh under scan_path to a uniform diffuse
+        material identical to the background plane, giving the FPP system a
+        clean surface to project fringes onto."""
         # Create the uniform material (identical to background plane)
         material_path = Sdf.Path("/World/UniformMaterial")
         
@@ -1218,8 +1291,9 @@ class HelloWorld(BaseSample):
         
         mesh_count = 0
         
-        def traverse_and_bind(prim):
-            """Recursive function to traverse hierarchy and bind meshes"""
+        def traverse_and_bind(prim: Usd.Prim) -> None:
+            """Recursively walk the prim hierarchy and bind the material to
+            every mesh found."""
             nonlocal mesh_count
             
             # Check if this prim is a Mesh
@@ -1238,8 +1312,9 @@ class HelloWorld(BaseSample):
         traverse_and_bind(scan_prim)
         print(f"Successfully bound material to {mesh_count} mesh(es)")
 
-    def _update_scan_object_pose(self):
-        """Update the scan object's rotation around its vertical axis"""
+    def _update_scan_object_pose(self) -> None:
+        """Rotate the scan object to scanning_params['current_angle'] about the
+        configured axis, keeping the other two axes at their base rotation."""
         stage = omni.usd.get_context().get_stage()
         parent_prim = stage.GetPrimAtPath(self.scanning_params['parent_path'])
         
@@ -1270,8 +1345,9 @@ class HelloWorld(BaseSample):
                 raise ValueError(f"Invalid rotation_axis: {axis}")
             print(f"Updated rotation axis {axis} to {current_angle} degrees")
 
-    def _load_texture_files(self):
-        """Load texture files from directory"""
+    def _load_texture_files(self) -> None:
+        """Load and naturally sort the fringe pattern textures, set the per-pose
+        / per-angle frame counts from their number, and apply the first one."""
         texture_directory = "C:/Users/oadam/downloads/full_fringe_patterns" # Modify texture directory to folder of n-step fringe patterns
         self.texture_files = sorted(
             [os.path.join(texture_directory, f) for f in os.listdir(texture_directory) if (f.endswith('.bmp') or f.endswith('.png'))],
@@ -1295,8 +1371,13 @@ class HelloWorld(BaseSample):
         self.set_projector_texture(self.texture_files[0])
         print(f"{len(self.texture_files)} texture files loaded.")
 
-    def update_texture_callback(self, step_size):
-        """Update texture and capture frames based on current mode"""
+    def update_texture_callback(self, step_size: float) -> None:
+        """Physics-step callback driving the capture loop.
+
+        Throttled by texture_update_interval and frame_skip, it captures a
+        frame, runs the mode-specific update, then advances to the next fringe
+        pattern. Registered in setup_post_load.
+        """
         current_time = self.simulation_context.current_time
         
         if current_time - self.last_texture_update_time >= self.texture_update_interval:
@@ -1322,8 +1403,9 @@ class HelloWorld(BaseSample):
                 self.last_texture_update_time = current_time
                 self.frames_since_update = 0
 
-    def _handle_ablation_update(self):
-        """Handle updates for ablation mode"""
+    def _handle_ablation_update(self) -> None:
+        """Advance the ablation capture count and stop the sim once the full
+        texture set has been captured."""
         self.ablation_params['frames_captured'] += 1
 
         if self.ablation_params['frames_captured'] >= self.ablation_params['frames_total']:
@@ -1333,8 +1415,9 @@ class HelloWorld(BaseSample):
             print(f"Total images captured: {self.frame_count}")
             self.simulation_context.stop()
 
-    def _handle_factory_arm_update(self):
-        """Handle updates for factory_arm mode (Franka-mounted FPP)"""
+    def _handle_factory_arm_update(self) -> None:
+        """Advance the factory_arm capture count and stop the sim once the full
+        texture set has been captured."""
         self.factory_arm_params['frames_captured'] += 1
         if self.factory_arm_params['frames_captured'] >= self.factory_arm_params['frames_total']:
             self.end_time = time.time()
@@ -1342,8 +1425,9 @@ class HelloWorld(BaseSample):
             print(f"Total images captured: {self.frame_count}")
             self.simulation_context.stop()
 
-    def _handle_training_update(self):
-        """Handle updates for training mode"""
+    def _handle_training_update(self) -> None:
+        """Advance the training capture count and stop the sim once the full
+        texture set has been captured."""
         self.training_params['frames_captured'] += 1
         
         if self.training_params['frames_captured'] >= self.training_params['frames_total']:
@@ -1354,8 +1438,9 @@ class HelloWorld(BaseSample):
             # print(f"Total capture time: {elapsed_time:.2f} seconds ({elapsed_time/60:.2f} minutes)")
             self.simulation_context.stop()
 
-    def _handle_scanning_update(self):
-        """Handle updates for scanning mode"""
+    def _handle_scanning_update(self) -> None:
+        """Advance the scan: once a full texture set is captured at the current
+        angle, step to the next angle (or stop the sim after a full turn)."""
         self.scanning_params['frames_captured_for_current_angle'] += 1
         
         if self.scanning_params['frames_captured_for_current_angle'] >= self.scanning_params['frames_per_angle']:
@@ -1373,8 +1458,10 @@ class HelloWorld(BaseSample):
                 # print(f"Total capture time: {elapsed_time:.2f} seconds ({elapsed_time/60:.2f} minutes)")
                 self.simulation_context.stop()
 
-    def _handle_calibration_update(self):
-        """Handle updates for calibration mode"""
+    def _handle_calibration_update(self) -> None:
+        """Advance calibration: once a full texture set is captured at the
+        current pose, step the board to the next pose (or stop the sim after
+        the last pose)."""
         self.calibration_params['frames_captured_for_current_pose'] += 1
         
         if self.calibration_params['frames_captured_for_current_pose'] >= self.calibration_params['frames_per_pose']:
@@ -1392,8 +1479,9 @@ class HelloWorld(BaseSample):
                 # print(f"Total capture time: {elapsed_time:.2f} seconds ({elapsed_time/60:.2f} minutes)")
                 self.simulation_context.stop()
 
-    def capture_camera_frames(self):
-        """Capture and save camera frames"""
+    def capture_camera_frames(self) -> None:
+        """Grab the current camera frame and write it to the mode-specific
+        output directory as PNG (grayscale or RGB per self.save_grayscale)."""
         # Determine save directory based on mode
         if self.mode == "calibrate":
             pose_number = self.calibration_params['current_pose_index'] + 1
@@ -1440,8 +1528,8 @@ class HelloWorld(BaseSample):
         else:
             print("Failed to capture frame or 'rgba' key is missing.")
 
-    def set_projector_texture(self, texture_file_path):
-        """Set the texture file for the projector light"""
+    def set_projector_texture(self, texture_file_path: str) -> None:
+        """Point the projector RectLight at the given fringe pattern image."""
         stage = omni.usd.get_context().get_stage()
         prim = stage.GetPrimAtPath(self.light_prim_path)
         if prim:
@@ -1450,8 +1538,9 @@ class HelloWorld(BaseSample):
                 texture_attr = prim.CreateAttribute("inputs:texture:file", Sdf.ValueTypeNames.Asset)
             texture_attr.Set(Sdf.AssetPath(texture_file_path))
 
-    def setup_calibration_board(self, stage):
-        """Setup the calibration board pattern, geometry, and material"""
+    def setup_calibration_board(self, stage: Usd.Stage) -> None:
+        """Create the calibration board plane, generate its circle-grid texture
+        via CalibrationBoardGenerator, and bind it as the diffuse material."""
         # Define the calibration board as a single-sided plane
         plane_path = "/World/CalibrationBoard"
         plane_prim = stage.GetPrimAtPath(plane_path)
@@ -1533,8 +1622,9 @@ class HelloWorld(BaseSample):
         # Bind material to the plane
         UsdShade.MaterialBindingAPI(plane_prim).Bind(material)
 
-    def update_calibration_board_pose(self):
-        """Update the calibration board pose based on the current index"""
+    def update_calibration_board_pose(self) -> None:
+        """Move the calibration board to the pose at the current index in
+        calibration_params['positions'/'orientations']."""
         stage = omni.usd.get_context().get_stage()
         plane_prim = stage.GetPrimAtPath("/World/CalibrationBoard")
         if plane_prim:
@@ -1566,8 +1656,9 @@ class HelloWorld(BaseSample):
                 rotate_op = transform_api.AddRotateXYZOp()
             rotate_op.Set(Gf.Vec3f(*self.calibration_params['orientations'][current_pose]))
 
-    def setup_background_plane(self, stage):
-        """Setup the background plane geometry and material"""
+    def setup_background_plane(self, stage: Usd.Stage) -> None:
+        """Create the diffuse backdrop plane placed behind the target so the
+        camera sees a clean, uniform background."""
         # Define the training plane as a single-sided plane
         plane_path = "/World/BackgroundPlane"
         plane_prim = stage.GetPrimAtPath(plane_path)
@@ -1636,20 +1727,22 @@ class HelloWorld(BaseSample):
         # Bind material to the plane
         UsdShade.MaterialBindingAPI(plane_prim).Bind(material)
 
-    async def setup_post_load(self):
-        """Setup post-load simulation state"""
+    async def setup_post_load(self) -> None:
+        """Register the per-physics-step texture/capture callback once the
+        world has loaded, starting the capture sequence."""
         world = self.get_world()
         world.add_physics_callback("update_texture", callback_fn=self.update_texture_callback)
         self.start_time = time.time()
         print("Starting capture sequence.")
         return
 
-    async def setup_pre_reset(self):
-        """Pre-reset cleanup"""
+    async def setup_pre_reset(self) -> None:
+        """Hook called before a world reset. No-op."""
         return
 
-    async def setup_post_reset(self):
-        """Reset simulation state"""
+    async def setup_post_reset(self) -> None:
+        """Reset the world and capture state (frame counters, texture index,
+        pose) so the sequence can run again from the start."""
         world = self.get_world()
         world.reset()
         
@@ -1678,6 +1771,6 @@ class HelloWorld(BaseSample):
             self.training_params['frames_captured'] = 0
         return
 
-    def world_cleanup(self):
-        """Cleanup simulation state"""
+    def world_cleanup(self) -> None:
+        """Hook called when the world is torn down. No-op."""
         return

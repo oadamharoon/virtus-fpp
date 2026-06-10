@@ -1,9 +1,30 @@
+"""Real-world calibration to Isaac Sim digital-twin conversion for VIRTUS-FPP.
+
+Helpers that read a real FPP system's OpenCV calibration (camera/projector
+intrinsic matrices and extrinsic rotation/translation, stored as tab-delimited
+text files) and convert them into the camera and projector parameters used by
+the virtual sensor in Isaac Sim. This includes the inverse-camera projector
+model (back-projecting the projector pixel grid to a real-world size) and the
+axis remaps between the OpenCV camera frame, the USD prim local frame, and the
+Isaac world frame. Enabled in the main sample via use_real_world_params.
+
+All matrices are loaded with numpy.loadtxt and a tab delimiter. Lengths are in
+millimeters in the calibration files and converted to meters where noted.
+"""
+
 import cv2
 import numpy as np
 import os
+from typing import List, Tuple
 from scipy.spatial.transform import Rotation as R_scipy
 
-def projector_rw2dt(proj_mat_path, h_p, w_p, scaling_factor=1.0):
+def projector_rw2dt(proj_mat_path: str, h_p: int, w_p: int, scaling_factor: float = 1.0) -> List[float]:
+    """Compute projector RectLight x/y scale factors from its intrinsic matrix.
+
+    Divides the fringe pattern size (w_p, h_p) by the projector focal lengths
+    (fx, fy) read from proj_mat_path. Returns [x_scale, y_scale]. Superseded by
+    inverse_camera in the current sample but kept for reference.
+    """
     # Load the projector intrinsic matrix from the text file
     projector_matrix = np.loadtxt(proj_mat_path, delimiter='\t', usecols=(0,1,2))
 
@@ -19,11 +40,14 @@ def projector_rw2dt(proj_mat_path, h_p, w_p, scaling_factor=1.0):
 
     return [x_scale, y_scale]
 
-def inverse_camera(proj_mat_path, proj_rot_path, proj_trans_path,
-                   w_p, h_p, screen_dist=1.0):
-    """
-    Loads projector intrinsics/extrinsics from text files and performs
-    inverse pinhole back-projection to compute real-world projection size.
+def inverse_camera(proj_mat_path: str, proj_rot_path: str, proj_trans_path: str,
+                   w_p: int, h_p: int, screen_dist: float = 1.0) -> List[float]:
+    """Inverse-camera projector model: real-world size of the projected image.
+
+    Loads the projector intrinsics and extrinsic rotation, back-projects the
+    pixel corners (0, 0) and (w_p, h_p) through the inverse pinhole model onto a
+    plane at screen_dist, and returns the resulting [width, height] in world
+    units. Used to scale the projector RectLight for the digital twin.
     """
 
     # --- Load intrinsic matrix (3x3) ---
@@ -52,7 +76,8 @@ def inverse_camera(proj_mat_path, proj_rot_path, proj_trans_path,
     px_0    = np.array([[0.0], [0.0], [1.0]])
     px_edge = np.array([[float(w_p)], [float(h_p)], [1.0]])
 
-    def backproject(px):
+    def backproject(px: np.ndarray) -> np.ndarray:
+        """Back-project a homogeneous pixel column onto the screen plane."""
         v = screen_dist * Mext_pinv @ (Mint_inv @ px)
         v = v[:3]
         v = v / v[2]
@@ -91,30 +116,41 @@ R_USD_LOCAL_TO_OPENCV_LOCAL = np.array([
 MM_TO_M = 1.0 / 1000.0
 
 
-def read_extrinsics(rot_path, trans_path):
+def read_extrinsics(rot_path: str, trans_path: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Load an OpenCV extrinsic rotation matrix (3x3) and translation vector
+    (3,) from the given text files."""
     R = np.loadtxt(rot_path, delimiter='\t', usecols=(0,1,2))
     T = np.asarray(np.loadtxt(trans_path), dtype=np.float64).reshape(3)
     return R, T
 
 
-def device_pose_in_camera_frame(R, T):
-    # OpenCV calibration's world-to-device transform with camera at origin:
-    # the device's position in the camera frame is -R^T * T.
+def device_pose_in_camera_frame(R: np.ndarray, T: np.ndarray) -> np.ndarray:
+    """Position of a device (camera/projector) in the camera frame.
+
+    For OpenCV's world-to-device transform with the camera at the origin, the
+    device position in the camera frame is -R^T * T.
+    """
     return -R.T @ T
 
 
-def opencv_offset_to_isaac_world(offset_mm):
+def opencv_offset_to_isaac_world(offset_mm: np.ndarray) -> np.ndarray:
+    """Convert an offset from the OpenCV camera-local frame (in millimeters)
+    to the Isaac USD world frame (in meters)."""
     offset_m = np.asarray(offset_mm, dtype=np.float64) * MM_TO_M
     return R_OPENCV_TO_ISAAC_WORLD @ offset_m
 
 
-def projector_world_position(proj_rot_path, proj_trans_path, camera_world_pos):
+def projector_world_position(proj_rot_path: str, proj_trans_path: str,
+                             camera_world_pos: np.ndarray) -> np.ndarray:
+    """World position of the projector, given its calibration extrinsics and
+    the camera's world position. Offsets the camera position by the projector's
+    pose in the camera frame, remapped into the Isaac world frame."""
     R, T = read_extrinsics(proj_rot_path, proj_trans_path)
     offset_world = opencv_offset_to_isaac_world(device_pose_in_camera_frame(R, T))
     return np.asarray(camera_world_pos, dtype=np.float64) + offset_world
 
 
-def projector_world_orientation(proj_rot_path):
+def projector_world_orientation(proj_rot_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Derive the projector's USD prim orient from the OpenCV world-to-projector
     rotation matrix. Returns (Q, euler_xyz_extrinsic_deg, euler_XYZ_intrinsic_deg).
@@ -137,7 +173,9 @@ def projector_world_orientation(proj_rot_path):
     return Q, euler_extr, euler_intr
 
 
-def projector_extrinsics(proj_extrinsics_path):
+def projector_extrinsics(proj_extrinsics_path: str) -> List[float]:
+    """Read a combined projector extrinsics matrix and return its 9 rotation
+    entries followed by its 3 translation entries as a flat list."""
     # Load the projector extrinsics from the text file
     projector_extrinsics = np.loadtxt(proj_extrinsics_path, delimiter='\t', usecols=(0,1,2))
 
@@ -152,7 +190,18 @@ def projector_extrinsics(proj_extrinsics_path):
 
     return [r11, r12, r13, r21, r22, r23, r31, r32, r33, t1, t2, t3]
 
-def camera_rw2dt(cam_mat_path, h_c, w_c, p_size, f_stop, f_dist):
+def camera_rw2dt(cam_mat_path: str, h_c: int, w_c: int, p_size: float,
+                 f_stop: float, f_dist: float) -> list:
+    """Convert a real camera's intrinsics into Isaac Sim camera parameters.
+
+    From the intrinsic matrix (cam_mat_path), sensor resolution (w_c, h_c),
+    pixel size (p_size, mm), f-stop and focus distance, derives the focal
+    length, apertures, principal-point aperture offsets, lens aperture, and
+    clipping range in Isaac Sim units. Returns them as a list in the order
+    [focal_length, focus_distance, lens_aperture, horizontal_aperture,
+    vertical_aperture, horizontal_aperture_offset, vertical_aperture_offset,
+    clipping_range]. Set f_stop to 0.0 to disable depth of field.
+    """
     # Load the camera matrix from the text file
     camera_matrix = np.loadtxt(cam_mat_path, delimiter='\t', usecols=(0,1,2))
     # Camera sensor resolution in pixels
@@ -209,7 +258,9 @@ def camera_rw2dt(cam_mat_path, h_c, w_c, p_size, f_stop, f_dist):
             horizontal_aperture_offset, vertical_aperture_offset,
             clipping_range]
 
-def cam_extrinsics(cam_extrinsics_path):
+def cam_extrinsics(cam_extrinsics_path: str) -> List[float]:
+    """Read a combined camera extrinsics matrix and return its 9 rotation
+    entries followed by its 3 translation entries as a flat list."""
     # Load the camera extrinsics from the text file
     camera_extrinsics = np.loadtxt(cam_extrinsics_path, delimiter='\t', usecols=(0,1,2))
 
