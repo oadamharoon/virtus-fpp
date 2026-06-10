@@ -74,7 +74,7 @@ class HelloWorld(BaseSample):
         self.mode = "ablation"  # "calibrate", "scan", "training", "ablation", or "factory_arm"
 
         # Add real-world system modeling flag and parameters
-        self.use_real_world_params = True  # Set to True to use real-world camera/projector parameters
+        self.use_real_world_params = False  # Set to True to use real-world camera/projector parameters
 
         calib_path = "C:/Users/oadam/Downloads/Calib_544_514/Calib_123" # alt: "C:/Users/oadam/Downloads/calibdata062024" 
 
@@ -1004,19 +1004,91 @@ class HelloWorld(BaseSample):
         right_light.GetIntensityAttr().Set(right_intensity)
         left_light.GetIntensityAttr().Set(left_intensity)
 
+    def _generate_uv_sphere(self, radius: float = 0.5, sectors: int = 32, stacks: int = 16):
+        """Build a UV-sphere mesh for the ablation test object.
+
+        Returns (points, normals, face_vertex_counts, face_vertex_indices) for a
+        sphere of the given radius, tessellated into `sectors` longitude segments
+        and `stacks` latitude segments. The two poles are single shared vertices
+        capped with triangle fans; the body between rings is quads. Normals are
+        the outward unit directions (smooth shading).
+        """
+        points = []
+        normals = []
+
+        # South pole (vertex 0)
+        points.append((0.0, 0.0, -radius))
+        normals.append((0.0, 0.0, -1.0))
+
+        # Latitude rings k = 1 .. stacks-1 (poles are handled separately)
+        for k in range(1, stacks):
+            phi = np.pi * k / stacks            # 0 at south pole, pi at north pole
+            z = -radius * np.cos(phi)
+            ring_radius = radius * np.sin(phi)
+            for j in range(sectors):
+                theta = 2.0 * np.pi * j / sectors
+                x = ring_radius * np.cos(theta)
+                y = ring_radius * np.sin(theta)
+                length = np.sqrt(x * x + y * y + z * z)
+                points.append((float(x), float(y), float(z)))
+                normals.append((float(x / length), float(y / length), float(z / length)))
+
+        # North pole (last vertex)
+        points.append((0.0, 0.0, radius))
+        normals.append((0.0, 0.0, 1.0))
+
+        south_pole = 0
+        north_pole = len(points) - 1
+
+        def ring_index(k: int, j: int) -> int:
+            # 0-indexed vertex for latitude ring k (1..stacks-1), sector j (wraps)
+            return 1 + (k - 1) * sectors + (j % sectors)
+
+        face_vertex_counts = []
+        face_vertex_indices = []
+
+        # South cap: triangle fan
+        for j in range(sectors):
+            face_vertex_counts.append(3)
+            face_vertex_indices += [south_pole, ring_index(1, j + 1), ring_index(1, j)]
+
+        # Body: quads between consecutive rings
+        for k in range(1, stacks - 1):
+            for j in range(sectors):
+                face_vertex_counts.append(4)
+                face_vertex_indices += [
+                    ring_index(k, j), ring_index(k, j + 1),
+                    ring_index(k + 1, j + 1), ring_index(k + 1, j),
+                ]
+
+        # North cap: triangle fan
+        for j in range(sectors):
+            face_vertex_counts.append(3)
+            face_vertex_indices += [ring_index(stacks - 1, j), ring_index(stacks - 1, j + 1), north_pole]
+
+        return points, normals, face_vertex_counts, face_vertex_indices
+
     def setup_ablation_sphere(self, stage: Usd.Stage) -> None:
-        """Create the sphere used as the ablation test object and bind its
-        material per ablation_params['material_type']."""
-        # Define the sphere
+        """Create the ablation test sphere and bind its material per
+        ablation_params['material_type']. The sphere is a tessellated UV-sphere
+        mesh so the FPP system projects onto real faceted geometry, matching
+        the sphere used in the paper."""
+        # Define the ablation sphere as a tessellated UV-sphere mesh
         sphere_path = "/World/AblationSphere"
         sphere_prim = stage.GetPrimAtPath(sphere_path)
-        if not sphere_prim:
-            sphere_prim = UsdGeom.Sphere.Define(stage, sphere_path)
+        if not sphere_prim or not sphere_prim.IsValid():
+            sphere_prim = UsdGeom.Mesh.Define(stage, sphere_path)
 
-        # Set radius to 0.5 (this will result in extent [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)])
+        # Radius 0.5 gives extent [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)]
         radius = 0.5
-        sphere_prim.GetExtentAttr().Set([(-radius, -radius, -radius), (radius, radius, radius)])
-        sphere_prim.GetRadiusAttr().Set(radius)
+        points, normals, face_vertex_counts, face_vertex_indices = \
+            self._generate_uv_sphere(radius=radius, sectors=32, stacks=16)
+        sphere_prim.CreatePointsAttr(points)
+        sphere_prim.CreateNormalsAttr(normals)
+        sphere_prim.CreateFaceVertexCountsAttr(face_vertex_counts)
+        sphere_prim.CreateFaceVertexIndicesAttr(face_vertex_indices)
+        sphere_prim.CreateSubdivisionSchemeAttr().Set(UsdGeom.Tokens.none)
+        sphere_prim.CreateExtentAttr().Set([(-radius, -radius, -radius), (radius, radius, radius)])
 
         prim = stage.GetPrimAtPath(self.light_prim_path)
         if prim:
@@ -1042,7 +1114,12 @@ class HelloWorld(BaseSample):
         transform_api = UsdGeom.Xformable(sphere_prim)
         transform_api.AddTranslateOp().Set(Gf.Vec3d(0.6, 0.0, 1.5))  # Position as specified
         transform_api.AddRotateXYZOp().Set(Gf.Vec3f(0, 0, 0))        # Orientation as specified
-        transform_api.AddScaleOp().Set(Gf.Vec3d(0.4, 0.4, 0.4))      # Scale as specified
+        # Scale 0.2 on the local radius-0.5 mesh gives an effective radius of
+        # 0.5 * 0.2 = 0.1 stage units. The Isaac Sim stage is in meters
+        # (metersPerUnit = 1.0), so that is 0.1 m = 100 mm radius (200 mm
+        # diameter). To resize the sphere, change this scale (e.g. 0.1 -> 50 mm
+        # radius) and leave the mesh generation alone.
+        transform_api.AddScaleOp().Set(Gf.Vec3d(0.2, 0.2, 0.2))
         
         # Create different materials based on the specified material type
         self._setup_ablation_material(stage, sphere_prim)
