@@ -1,0 +1,42 @@
+cff-version: 1.2.0
+message: "If you use VIRTUS-FPP in your research, please cite the article below."
+title: "VIRTUS-FPP: Virtual Sensor Modeling for Fringe Projection Profilometry in NVIDIA Isaac Sim"
+authors:
+  - given-names: Adam
+    family-names: Haroon
+    affiliation: "Department of Mechanical Engineering, Iowa State University, Ames, IA, USA"
+  - given-names: Anush
+    family-names: Lakshman
+    affiliation: "Department of Mechanical Engineering, Iowa State University, Ames, IA, USA"
+  - given-names: Badrinath
+    family-names: Balasubramaniam
+    affiliation: "College of Engineering, University of Georgia, Athens, GA, USA"
+  - given-names: Beiwen
+    family-names: Li
+    affiliation: "College of Engineering, University of Georgia, Athens, GA, USA"
+repository-code: "https://github.com/oadamharoon/virtus-fpp"
+keywords:
+  - digital twin
+  - fringe projection profilometry
+  - NVIDIA Isaac Sim
+  - optical metrology
+  - ray-tracing simulation
+  - structured light
+  - synthetic data generation
+  - virtual sensor modeling
+preferred-citation:
+  type: article
+  title: "VIRTUS-FPP: Virtual Sensor Modeling for Fringe Projection Profilometry in NVIDIA Isaac Sim"
+  authors:
+    - given-names: Adam
+      family-names: Haroon
+    - given-names: Anush
+      family-names: Lakshman
+    - given-names: Badrinath
+      family-names: Balasubramaniam
+    - given-names: Beiwen
+      family-names: Li
+  journal: "IEEE Sensors Journal"
+  year: 2026
+  pages: "1-1"
+  doi: "10.1109/JSEN.2026.3698278"
