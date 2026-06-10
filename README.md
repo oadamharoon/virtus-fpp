@@ -29,21 +29,31 @@ This is the reference implementation for the paper:
 
 ## Requirements
 
-- NVIDIA Isaac Sim 4.1
+- NVIDIA Isaac Sim 4.1.0
 - An RTX-capable NVIDIA GPU
 - Python dependencies used by the sample: `numpy`, `opencv-python` (`cv2`)
 
+> **Note:** Isaac Sim 4.1.0 is an older release and is no longer officially
+> supported by NVIDIA, but it is the version VIRTUS-FPP was built and tested
+> against. The code uses standard Isaac Sim APIs and should transfer to newer
+> Isaac Sim versions with little to no change.
+
 ## Installation
 
-Place this repository in the Isaac Sim user examples directory so it is picked
-up as a user extension:
+See [INSTALLATION.md](INSTALLATION.md) for full setup instructions, including
+where to download Isaac Sim 4.1.0, how to install the project, how to launch it
+from the **Isaac Examples** menu, and known issues.
+
+In short: place this repository in the Isaac Sim user examples directory so it
+is picked up as a user extension:
 
 ```
 <isaac-sim>/exts/omni.isaac.examples/omni/isaac/examples/user_examples/
 ```
 
-Launch Isaac Sim, open the sample from the examples menu, and press **LOAD**.
-The capture sequence starts automatically once the world finishes loading.
+Launch Isaac Sim, open **Robot test development** from the **Isaac Examples**
+menu, and press **LOAD**. The capture sequence starts automatically once the
+world finishes loading.
 
 ## Usage
 
@@ -101,6 +111,12 @@ If you use VIRTUS-FPP in your research, please cite the paper:
   keywords={Modeling;Optical projectors;Calibration;Cameras;Lighting;Image sensors;Simulation;Ray tracing;Measurement;Digital twins;Digital twin;fringe projection profilometry;NVIDIA Isaac Sim;optical metrology;ray-tracing simulation;structured light;synthetic data generation;virtual sensor modeling},
   doi={10.1109/JSEN.2026.3698278}}
 ```
+
+## Contact
+
+For questions, please contact Adam Haroon at
+[aharoon@iastate.edu](mailto:aharoon@iastate.edu), or open an issue on the
+repository.
 
 ## License
 
