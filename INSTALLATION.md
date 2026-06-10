@@ -60,11 +60,12 @@ and `realworld2digitaltwin.py` sit directly under `user_examples`.
 ## 4. Configure paths
 
 Before running, edit `HelloWorld.__init__` in `hello_world.py` and point the
-sample at your local paths (see the [README](README.md) for details):
+sample at your local paths (all set in `__init__`; see the [README](README.md)
+for details):
 
-- the fringe pattern texture directory (`_load_texture_files`)
-- the output directories where captured frames are saved (`capture_camera_frames`)
-- the calibration files (`calib_path`), only needed when `use_real_world_params = True`
+- `self.texture_directory` -> the fringe pattern texture folder
+- each mode's `save_directory` -> the output root where that mode's frames are saved
+- `calib_path` -> the calibration files, only needed when `use_real_world_params = True`
 
 Also set the operating mode:
 
@@ -102,7 +103,7 @@ Traceback (most recent call last):
     await self._sample.load_world_async()
   File ".../base_sample/base_sample.py", line 43, in load_world_async
     self.setup_scene()
-  File ".../user_examples/hello_world.py", line 661, in setup_scene
+  File ".../user_examples/hello_world.py", line 677, in setup_scene
     world.scene.add_default_ground_plane()
 AttributeError: 'SimulationContext' object has no attribute 'scene'
 ```

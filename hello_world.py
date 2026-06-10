@@ -71,7 +71,7 @@ class HelloWorld(BaseSample):
         self.simulation_context = SimulationContext(set_defaults=True)
         
         # Operation mode
-        self.mode = "ablation"  # "calibrate", "scan", "training", "ablation", or "factory_arm"
+        self.mode = "scan"  # "calibrate", "scan", "training", "ablation", or "factory_arm"
 
         # Add real-world system modeling flag and parameters
         self.use_real_world_params = False  # Set to True to use real-world camera/projector parameters
@@ -109,6 +109,9 @@ class HelloWorld(BaseSample):
         self.frames_since_update = 0
         self.save_grayscale = True
 
+        # Directory of n-step fringe pattern textures (.bmp / .png) to project
+        self.texture_directory = "C:/Users/oadam/downloads/full_fringe_patterns"
+
         # Time tracking
         self.start_time = None
         self.end_time = None
@@ -119,7 +122,9 @@ class HelloWorld(BaseSample):
             'frames_per_pose': 0,
             'frames_captured_for_current_pose': 0,
             'positions': self._get_calibration_positions(),
-            'orientations': self._get_calibration_orientations()
+            'orientations': self._get_calibration_orientations(),
+            # Output root; a per-pose subfolder (P1, P2, ...) is created under it
+            'save_directory': "C:/Users/oadam/Downloads/isaac_calib_scans_dtwin_old_poses",
         }
 
         # Scanning mode parameters
@@ -134,9 +139,70 @@ class HelloWorld(BaseSample):
             'base_position': Gf.Vec3d(0.6, -0.125, 1.5),  # Centered position in front of camera
             'base_rotation': Gf.Vec3f(0, 0, 0),  # Initial rotation 
             'rotation_axis': 'z',
-            'scan_object': 'banana',  # Select from item in self.SCAN_OBJECTS
+            'scan_object': 'lighting_candles',  # Select from item in self.SCAN_OBJECTS
+            # Output root; per-object/per-angle subfolders ({object}/A{angle})
+            # are created under it
+            'save_directory': "C:/Users/oadam/Downloads/fpp_synthetic_dataset",
         }
 
+        # Training mode parameters
+        self.training_params = {
+            'frames_captured': 0,
+            'frames_total': 0,      # Will be set based on texture files
+            'plane_size': 0.25,     # Larger plane size (2x the calibration board), adjusted from 1.0 to 0.25 to match calibration board size
+            'save_directory': "C:/Users/oadam/Downloads/isaac_calib_scans_rt0_albation_test_sphere_rectambientlight2",
+        }
+
+        # Ablation mode parameters
+        self.ablation_params = {
+            'material_type': 'Baseline',  # Options: 'Baseline', 'Reflective', 'Metallic', 'AO_to_diffuse_0'
+            'lighting_setup': 'Baseline',  # Options: 'No_Ambient', 'Baseline', 'One_Ambient', 'Two_Ambient'
+            'frames_captured': 0,
+            'frames_total': 0,  # Will be set based on texture files
+            # Output root; a {material}_{lighting} subfolder is created under it
+            'save_directory': "C:/Users/oadam/Downloads/ablation_scans",
+        }
+
+        # Factory arm mode parameters. The Franka carries the FPP camera +
+        # projector. Env and scan target are loaded as references from
+        # absolute URLs (same SimReady source as the other modes use).
+        self.factory_arm_params = {
+            'frames_captured': 0,
+            'frames_total': 0,
+            'save_directory':     "C:/Users/oadam/Downloads/factory_arm_scans",
+            'robot_prim_path':    "/World/Franka",
+            'env_prim_path':      "/World/Factory",
+            'target_prim_path':   "/World/ScanTarget",
+            'env_asset_url':      "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.1/Isaac/Environments/Simple_Warehouse/warehouse_with_forklifts.usd",
+            'target_asset_url':   "https://huggingface.co/datasets/nvidia/PhysicalAI-SimReady-Warehouse-01/resolve/main/Props/general/HandManipulation/cleaning_bottle_spray_a/sm_cleaning_bottle_spray_a01_simready_01.usd",
+            'target_position':    np.array([0.7, 0.0, 0.0]),
+            'target_scale':       np.array([6.0, 6.0, 6.0]),
+            # Dim every light baked into the warehouse env by this factor so
+            # the FPP projector dominates the scene (FPP works best in the
+            # dark). 0.0 kills env lighting entirely; 1.0 is unchanged.
+            'env_light_dim_factor': 0.05,
+            # Initial joint positions for the Franka. 9 DOFs total:
+            # 7 arm joints + 2 gripper finger joints. Arm values are tuned
+            # to bend forward-and-down so the FPP rig on the gripper looks
+            # at the scan target sitting on the floor in front of the
+            # robot; finger values keep the gripper open at ~4cm.
+            'initial_joint_positions': np.array(
+                [0.0, 0.85, 0.0, -1.7, 0.0, 2.55, 0.785, 0.04, 0.04]
+            ),
+            # Camera + projector poses in the end-effector's local frame.
+            # The camera sits at the hand origin (rotated 90 deg about Y so
+            # it looks down the gripper axis), the projector is offset
+            # 125 mm to the left to match the FPP baseline.
+            'cam_local_pos':      np.array([0.0,    0.0, 0.10]),
+            'cam_local_euler_deg':np.array([0.0,   90.0, 0.0]),
+            'proj_local_pos':     Gf.Vec3f(-0.125, 0.0, 0.10),
+            'proj_local_euler':   Gf.Vec3f(270.0, 180.0, 90.0),
+        }
+
+        # Scan object catalog. Each entry has an asset_path and optional
+        # per-object overrides that adjust the default scanning_params (base
+        # rotation/position/scale) so the object sits upright and framed.
+        # Defined last so self.scanning_params already exists.
         self.SCAN_OBJECTS = {
             # ==================================
             # Isaac Sim pre-defined YCB objects
@@ -479,56 +545,6 @@ class HelloWorld(BaseSample):
                     "base_rotation": Gf.Vec3f(90, self.scanning_params['base_rotation'][1], self.scanning_params['base_rotation'][2]),
                 },
             },
-        }
-
-        # Training mode parameters
-        self.training_params = {
-            'frames_captured': 0,
-            'frames_total': 0,      # Will be set based on texture files
-            'plane_size': 0.25,     # Larger plane size (2x the calibration board), adjusted from 1.0 to 0.25 to match calibration board size
-        }
-
-        # Ablation mode parameters
-        self.ablation_params = {
-            'material_type': 'Baseline',  # Options: 'Baseline', 'Reflective', 'Metallic', 'AO_to_diffuse_0'
-            'lighting_setup': 'Baseline',  # Options: 'No_Ambient', 'Baseline', 'One_Ambient', 'Two_Ambient'
-            'frames_captured': 0,
-            'frames_total': 0,  # Will be set based on texture files
-        }
-
-        # Factory arm mode parameters. The Franka carries the FPP camera +
-        # projector. Env and scan target are loaded as references from
-        # absolute URLs (same SimReady source as the other modes use).
-        self.factory_arm_params = {
-            'frames_captured': 0,
-            'frames_total': 0,
-            'robot_prim_path':    "/World/Franka",
-            'env_prim_path':      "/World/Factory",
-            'target_prim_path':   "/World/ScanTarget",
-            'env_asset_url':      "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.1/Isaac/Environments/Simple_Warehouse/warehouse_with_forklifts.usd",
-            'target_asset_url':   "https://huggingface.co/datasets/nvidia/PhysicalAI-SimReady-Warehouse-01/resolve/main/Props/general/HandManipulation/cleaning_bottle_spray_a/sm_cleaning_bottle_spray_a01_simready_01.usd",
-            'target_position':    np.array([0.7, 0.0, 0.0]),
-            'target_scale':       np.array([6.0, 6.0, 6.0]),
-            # Dim every light baked into the warehouse env by this factor so
-            # the FPP projector dominates the scene (FPP works best in the
-            # dark). 0.0 kills env lighting entirely; 1.0 is unchanged.
-            'env_light_dim_factor': 0.05,
-            # Initial joint positions for the Franka. 9 DOFs total:
-            # 7 arm joints + 2 gripper finger joints. Arm values are tuned
-            # to bend forward-and-down so the FPP rig on the gripper looks
-            # at the scan target sitting on the floor in front of the
-            # robot; finger values keep the gripper open at ~4cm.
-            'initial_joint_positions': np.array(
-                [0.0, 0.85, 0.0, -1.7, 0.0, 2.55, 0.785, 0.04, 0.04]
-            ),
-            # Camera + projector poses in the end-effector's local frame.
-            # The camera sits at the hand origin (rotated 90 deg about Y so
-            # it looks down the gripper axis), the projector is offset
-            # 125 mm to the left to match the FPP baseline.
-            'cam_local_pos':      np.array([0.0,    0.0, 0.10]),
-            'cam_local_euler_deg':np.array([0.0,   90.0, 0.0]),
-            'proj_local_pos':     Gf.Vec3f(-0.125, 0.0, 0.10),
-            'proj_local_euler':   Gf.Vec3f(270.0, 180.0, 90.0),
         }
 
     def _get_calibration_positions(self) -> list:
@@ -1425,7 +1441,7 @@ class HelloWorld(BaseSample):
     def _load_texture_files(self) -> None:
         """Load and naturally sort the fringe pattern textures, set the per-pose
         / per-angle frame counts from their number, and apply the first one."""
-        texture_directory = "C:/Users/oadam/downloads/full_fringe_patterns" # Modify texture directory to folder of n-step fringe patterns
+        texture_directory = self.texture_directory  # Set in __init__
         self.texture_files = sorted(
             [os.path.join(texture_directory, f) for f in os.listdir(texture_directory) if (f.endswith('.bmp') or f.endswith('.png'))],
             key=natural_sort_key
@@ -1559,25 +1575,27 @@ class HelloWorld(BaseSample):
     def capture_camera_frames(self) -> None:
         """Grab the current camera frame and write it to the mode-specific
         output directory as PNG (grayscale or RGB per self.save_grayscale)."""
-        # Determine save directory based on mode
+        # Determine save directory based on mode. The per-mode save_directory
+        # root is set in __init__; dynamic per-pose/per-angle/per-config
+        # subfolders are appended here.
         if self.mode == "calibrate":
             pose_number = self.calibration_params['current_pose_index'] + 1
-            save_directory = f"C:/Users/oadam/Downloads/isaac_calib_scans_dtwin_old_poses/P{pose_number}"
+            save_directory = f"{self.calibration_params['save_directory']}/P{pose_number}"
             image_index = self.calibration_params['frames_captured_for_current_pose']
         elif self.mode == "scan":
             angle = self.scanning_params['current_angle']
-            save_directory = f"C:/Users/oadam/Downloads/fpp_synthetic_dataset/{self.scanning_params['scan_object']}/A{angle}"
+            save_directory = f"{self.scanning_params['save_directory']}/{self.scanning_params['scan_object']}/A{angle}"
             image_index = self.scanning_params['frames_captured_for_current_angle']
         elif self.mode == "ablation":
             material = self.ablation_params['material_type']
             lighting = self.ablation_params['lighting_setup']
-            save_directory = f"C:/Users/oadam/Downloads/ablation_scans/{material}_{lighting}"
+            save_directory = f"{self.ablation_params['save_directory']}/{material}_{lighting}"
             image_index = self.ablation_params['frames_captured']
         elif self.mode == "factory_arm":
-            save_directory = "C:/Users/oadam/Downloads/factory_arm_scans"
+            save_directory = self.factory_arm_params['save_directory']
             image_index = self.factory_arm_params['frames_captured']
         else: # Training mode
-            save_directory = "C:/Users/oadam/Downloads/isaac_calib_scans_rt0_albation_test_sphere_rectambientlight2"
+            save_directory = self.training_params['save_directory']
             image_index = self.training_params['frames_captured']
         
         os.makedirs(save_directory, exist_ok=True)

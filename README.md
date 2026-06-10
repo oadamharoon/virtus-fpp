@@ -4,7 +4,7 @@
 
 VIRTUS-FPP is an end-to-end virtual sensor model for fringe projection
 profilometry (FPP) built as a user extension for [NVIDIA Isaac Sim](https://developer.nvidia.com/isaac-sim)
-4.1. It places a virtual camera and an inverse-camera-modeled projector (a
+4.1.0. It places a virtual camera and an inverse-camera-modeled projector (a
 textured `RectLight` that cycles through a stack of fringe patterns) in an RTX
 ray-traced scene, captures one image per projected pattern, and writes the
 frames to disk for downstream phase unwrapping and 3D reconstruction. The
@@ -25,7 +25,6 @@ This is the reference implementation for the paper:
 | `hello_world_extension.py` | Isaac Sim extension entry point that registers the sample in the UI. |
 | `CalibrationBoardGenerator.py` | Generates the circle-grid calibration board texture. |
 | `realworld2digitaltwin.py` | Converts real camera/projector calibration (intrinsics and extrinsics) into Isaac Sim parameters, including the inverse-camera projector model. |
-| `objects.py` | Scan object asset definitions. |
 
 ## Requirements
 
@@ -64,18 +63,19 @@ Set the operating mode there:
 self.mode = "calibrate"  # "calibrate", "scan", "training", "ablation", or "factory_arm"
 ```
 
-Before running, point the sample at your local paths:
+Before running, point the sample at your local paths. These are all set in
+`__init__`:
 
-- `texture_directory` in `_load_texture_files` -> folder of N-step fringe pattern images (`.bmp` / `.png`)
-- the `save_directory` values in `capture_camera_frames` -> where captured frames are written
-- `calib_path` in `__init__` -> your calibration files, only needed when `use_real_world_params = True`
+- `self.texture_directory` -> folder of N-step fringe pattern images (`.bmp` / `.png`)
+- each mode's `save_directory` (in `calibration_params`, `scanning_params`, `training_params`, `ablation_params`, `factory_arm_params`) -> output root where that mode's captured frames are written
+- `calib_path` -> your calibration files, only needed when `use_real_world_params = True`
 
 ### Modes
 
 | Mode | What it does |
 | --- | --- |
 | `calibrate` | Sweeps a circle-grid calibration board through a series of poses to recover camera and projector intrinsics and extrinsics. Poses are defined by `_get_calibration_positions` / `_get_calibration_orientations`. |
-| `scan` | Rotates a YCB / SimReady object on a turntable and captures fringe images at each angle for synthetic dataset generation. Object and turntable settings are in `scanning_params`; available objects are in `SCAN_OBJECTS`. |
+| `scan` | Rotates a YCB / SimReady object on a turntable and captures fringe images at each angle for synthetic dataset generation. Object and turntable settings are in `scanning_params`; available objects are in `self.SCAN_OBJECTS`. |
 | `training` | Projects fringes onto a flat plane, e.g. to generate phase-unwrapping training data. |
 | `ablation` | Varies surface material and ambient lighting to study their effect on reconstruction quality. Controlled by `ablation_params`. |
 | `factory_arm` | Mounts the FPP rig on a Franka end-effector in a warehouse environment for a robot-mounted scanning demo. Controlled by `factory_arm_params`. |
